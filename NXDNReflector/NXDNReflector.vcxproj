@@ -19,11 +19,14 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="BlockList.h" />
+    <ClInclude Include="Callsign.h" />
     <ClInclude Include="Conf.h" />
     <ClInclude Include="IcomNetwork.h" />
     <ClInclude Include="KenwoodNetwork.h" />
     <ClInclude Include="NXDNCRC.h" />
     <ClInclude Include="NXDNLookup.h" />
+    <ClInclude Include="LoopDetect.h" />
     <ClInclude Include="Log.h" />
     <ClInclude Include="Mutex.h" />
     <ClInclude Include="NXDNNetwork.h" />
@@ -36,12 +39,14 @@
     <ClInclude Include="Version.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="BlockList.cpp" />
     <ClCompile Include="Conf.cpp" />
     <ClCompile Include="IcomNetwork.cpp" />
     <ClCompile Include="KenwoodNetwork.cpp" />
     <ClCompile Include="NXDNCRC.cpp" />
     <ClCompile Include="NXDNLookup.cpp" />
     <ClCompile Include="Log.cpp" />
+    <ClCompile Include="LoopDetect.cpp" />
     <ClCompile Include="Mutex.cpp" />
     <ClCompile Include="NXDNNetwork.cpp" />
     <ClCompile Include="NXDNReflector.cpp" />

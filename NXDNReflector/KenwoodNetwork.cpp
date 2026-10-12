@@ -112,6 +112,9 @@ bool CKenwoodNetwork::write(const unsigned char* data, unsigned int length)
 {
 	assert(data != NULL);
 
+	if (length < 33U)
+		return false;
+
 	switch (data[0U]) {
 	case 0x81U:	// Voice header or trailer
 	case 0x83U:
@@ -789,7 +792,9 @@ unsigned int CKenwoodNetwork::processKenwoodData(unsigned char* inData)
 	if (inData[7U] != 0x09U && inData[7U] != 0x0BU && inData[7U] != 0x08U)
 		return 0U;
 
+	// Zero padded to a full 33 byte payload, callers copy all 33
 	unsigned char outData[50U];
+	::memset(outData, 0x00U, 50U);
 
 	if (inData[7U] == 0x09U || inData[7U] == 0x08U) {
 		outData[0U] = 0x90U;
@@ -799,7 +804,7 @@ unsigned int CKenwoodNetwork::processKenwoodData(unsigned char* inData)
 		outData[4U] = inData[9U];
 		outData[5U] = inData[12U];
 		outData[6U] = inData[11U];
-		::memcpy(inData, outData, 7U);
+		::memcpy(inData, outData, 33U);
 		return 7U;
 	} else {
 		outData[0U]  = 0x90U;
@@ -826,7 +831,7 @@ unsigned int CKenwoodNetwork::processKenwoodData(unsigned char* inData)
 		outData[21U] = inData[28U];
 		outData[22U] = inData[27U];
 		outData[23U] = inData[29U];
-		::memcpy(inData, outData, 24U);
+		::memcpy(inData, outData, 33U);
 		return 24U;
 	}
 }

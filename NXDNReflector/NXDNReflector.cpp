@@ -17,6 +17,8 @@
 */
 
 #include "NXDNReflector.h"
+#include "BlockList.h"
+#include "LoopDetect.h"
 #include "NXDNNetwork.h"
 #include "NXDNLookup.h"
 #include "StopWatch.h"
@@ -51,6 +53,8 @@ const char* DEFAULT_INI_FILE = "/etc/NXDNReflector.ini";
 #include <ctime>
 #include <cstring>
 #include <algorithm>
+#include <string>
+#include <unordered_set>
 
 int main(int argc, char** argv)
 {
@@ -218,6 +222,20 @@ void CNXDNReflector::run()
 	CNXDNLookup* lookup = new CNXDNLookup(m_conf.getLookupName(), m_conf.getLookupTime());
 	lookup->read();
 
+	CBlockList blockList(m_conf.getBlockListFile(), m_conf.getBlockListTime(), lookup);
+	blockList.start();
+
+	CLoopDetect loopDetect;
+
+	// Address of the node of the transmission being scored, strike 3 removes it
+	sockaddr_storage loopAddr;
+	::memset(&loopAddr, 0x00U, sizeof(sockaddr_storage));
+
+	// Loop detection user: their callsign, so all their Ids, or the Id if it isn't in the lookup
+	auto nxdnUser = [lookup](unsigned int id) -> std::string {
+		return lookup->find(id);
+	};
+
 	CStopWatch stopWatch;
 	stopWatch.start();
 
@@ -241,6 +259,26 @@ void CNXDNReflector::run()
 
 	CTimer watchdogTimer(1000U, 0U, 1500U);
 
+	unsigned short blockedId = 0U;
+	CTimer blockedTimer(1000U, 0U, 1500U);
+
+	// Blocked nodes already logged, stops their polls flooding the log
+	std::unordered_set<std::string> blockedNodes;
+
+	// Strike 3: drop the node the loop came through, by address as callsigns can be shared
+	auto removeLooper = [&](const sockaddr_storage& addr) {
+		for (std::vector<CNXDNRepeater*>::iterator it = m_repeaters.begin(); it != m_repeaters.end(); ++it) {
+			if (CUDPSocket::match((*it)->m_addr, addr)) {
+				char buff[80U];
+				LogMessage("Removing %s (%s) loop detected", (*it)->m_callsign.c_str(), CUDPSocket::display((*it)->m_addr, buff, 80U));
+
+				delete *it;
+				m_repeaters.erase(it);
+				break;
+			}
+		}
+	};
+
 	for (;;) {
 		unsigned char buffer[200U];
 		sockaddr_storage address;
@@ -252,7 +290,13 @@ void CNXDNReflector::run()
 
 			if (::memcmp(buffer, "NXDNP", 5U) == 0 && len == 17U) {
 				unsigned short id = (buffer[15U] << 8) | buffer[16U];
-				if (id == tg) {
+				// Refuse to link a blocked node, or one barred for looping
+				if (id == tg && rpt == NULL && (blockList.checkCallsign(std::string((char*)(buffer + 5U), 10U)) || loopDetect.checkLink(std::string((char*)(buffer + 5U), 10U)))) {
+					char buff[80U];
+					CUDPSocket::display(address, buff, 80U);
+					if (blockedNodes.insert(std::string(buff)).second)
+						LogMessage("Linking of %10.10s (%s) blocked", buffer + 5U, buff);
+				} else if (id == tg) {
 					if (rpt == NULL) {
 						rpt = new CNXDNRepeater;
 						rpt->m_timer.start();
@@ -263,6 +307,7 @@ void CNXDNReflector::run()
 
 						char buff[80U];
 						LogMessage("Adding %s (%s)", rpt->m_callsign.c_str(), CUDPSocket::display(address, buff, 80U));
+						blockedNodes.erase(std::string(buff));
 					} else {
 						rpt->m_timer.start();
 					}
@@ -286,6 +331,15 @@ void CNXDNReflector::run()
 							}
 						}
 
+						// End the transmission if its repeater has gone
+						if (rpt == current) {
+							watchdogTimer.stop();
+							current = NULL;
+							active = ACTIVE_NONE;
+							// Cut short by the unlink, not scored
+							loopDetect.cancel();
+						}
+
 						delete rpt;
 					}
 				}
@@ -295,43 +349,61 @@ void CNXDNReflector::run()
 					unsigned short dstId = (buffer[7U] << 8) | buffer[8U];
 					bool grp = (buffer[9U] & 0x01U) == 0x01U;
 
-					if (icomEnabled && icomTGEnable != 0U && grp && dstId == icomTGEnable) {
+					// Block listed, or blocked for looping (user or node)
+					bool listed  = blockList.check(srcId);
+					bool blocked = listed || loopDetect.check(nxdnUser(srcId), rpt->m_callsign);
+					if (listed) {
+						// Only log once per blocked transmission
+						if (!blockedTimer.isRunning() || srcId != blockedId) {
+							std::string callsign = lookup->find(srcId);
+							LogMessage("Data from %s (%u) at %s blocked", callsign.c_str(), srcId, rpt->m_callsign.c_str());
+							blockedId = srcId;
+						}
+
+						blockedTimer.start();
+
+						if ((buffer[9U] & 0x08U) == 0x08U)
+							blockedTimer.stop();
+					}
+
+					// Blocked users can't switch the network links either
+					if (!blocked && icomEnabled && icomTGEnable != 0U && grp && dstId == icomTGEnable) {
 						if (m_icomNetwork == NULL) {
 							std::string callsign = lookup->find(srcId);
-							LogMessage("Icom Network link enabled by %s at %s", callsign.c_str(), current->m_callsign.c_str());
+							LogMessage("Icom Network link enabled by %s at %s", callsign.c_str(), rpt->m_callsign.c_str());
 							bool ok = openIcomNetwork();
 							if (!ok)
 								LogWarning("Unable to open the Icom Network link");
 						}
 					}
 
-					if (kenwoodEnabled && kenwoodTGEnable != 0U && grp && dstId == kenwoodTGEnable) {
+					if (!blocked && kenwoodEnabled && kenwoodTGEnable != 0U && grp && dstId == kenwoodTGEnable) {
 						if (m_kenwoodNetwork == NULL) {
 							std::string callsign = lookup->find(srcId);
-							LogMessage("Kenwood Network link enabled by %s at %s", callsign.c_str(), current->m_callsign.c_str());
+							LogMessage("Kenwood Network link enabled by %s at %s", callsign.c_str(), rpt->m_callsign.c_str());
 							bool ok = openKenwoodNetwork();
 							if (!ok)
 								LogWarning("Unable to open the Kenwood Network link");
 						}
 					}
 
-					if (icomEnabled && icomTGDisable != 0U && grp && dstId == icomTGDisable) {
+					if (!blocked && icomEnabled && icomTGDisable != 0U && grp && dstId == icomTGDisable) {
 						if (m_icomNetwork != NULL) {
 							std::string callsign = lookup->find(srcId);
-							LogMessage("Icom Network link disabled by %s at %s", callsign.c_str(), current->m_callsign.c_str());
+							LogMessage("Icom Network link disabled by %s at %s", callsign.c_str(), rpt->m_callsign.c_str());
 							closeIcomNetwork();
 						}
 					}
 
-					if (kenwoodEnabled && kenwoodTGDisable != 0U && grp && dstId == kenwoodTGDisable) {
+					if (!blocked && kenwoodEnabled && kenwoodTGDisable != 0U && grp && dstId == kenwoodTGDisable) {
 						if (m_kenwoodNetwork != NULL) {
 							std::string callsign = lookup->find(srcId);
-							LogMessage("Kenwood Network link disabled by %s at %s", callsign.c_str(), current->m_callsign.c_str());
+							LogMessage("Kenwood Network link disabled by %s at %s", callsign.c_str(), rpt->m_callsign.c_str());
 							closeKenwoodNetwork();
 						}
 					}
 
-					if (grp && dstId == tg) {
+					if (!blocked && grp && dstId == tg) {
 						rpt->m_timer.start();
 
 						if (current == NULL && active == ACTIVE_NONE) {
@@ -341,33 +413,45 @@ void CNXDNReflector::run()
 							LogMessage("Transmission from %s at %s to %s%u", callsign.c_str(), current->m_callsign.c_str(), grp ? "TG " : "", dstId);
 
 							active = ACTIVE_NXDN;
+							loopDetect.start(nxdnUser(srcId), rpt->m_callsign);
+							::memcpy(&loopAddr, &rpt->m_addr, sizeof(sockaddr_storage));
 						}
 
 						if (active == ACTIVE_NXDN) {
 							watchdogTimer.start();
+							loopDetect.touch();
 
 							for (std::vector<CNXDNRepeater*>::const_iterator it = m_repeaters.begin(); it != m_repeaters.end(); ++it) {
 								if (!CUDPSocket::match((*it)->m_addr, address))
 									nxdnNetwork.write(buffer, len, (*it)->m_addr, (*it)->m_addrLen);
 							}
 
+							// The networks take the 33 byte payload, not the NXDND packet
 							if (m_icomNetwork != NULL)
-								m_icomNetwork->write(buffer, len);
+								m_icomNetwork->write(buffer + 10U, 33U);
 
 							if (m_kenwoodNetwork != NULL)
-								m_kenwoodNetwork->write(buffer, len);
+								m_kenwoodNetwork->write(buffer + 10U, 33U);
 
 							if ((buffer[9U] & 0x08U) == 0x08U) {
 								LogMessage("Received end of transmission");
 								current = NULL;
 								active = ACTIVE_NONE;
 								watchdogTimer.stop();
+
+								// Strike 3 removes the node
+								if (loopDetect.end())
+									removeLooper(loopAddr);
 							}
 						}
 					}
 				} else {
-					LogMessage("Data received from an unknown source");
-					CUtils::dump(2U, "Data", buffer, len);
+					char buff[80U];
+					// Stay quiet about traffic from blocked nodes
+					if (blockedNodes.count(std::string(CUDPSocket::display(address, buff, 80U))) == 0U) {
+						LogMessage("Data received from an unknown source");
+						CUtils::dump(2U, "Data", buffer, len);
+					}
 				}
 			}
 		}
@@ -382,7 +466,13 @@ void CNXDNReflector::run()
 							unsigned short tempSrcId = (buffer[8U]  << 8) | buffer[9U];
 							unsigned short tempDstId = (buffer[10U] << 8) | buffer[11U];
 
-							if (tempGrp && tempDstId == tg) {
+							// Blocked user on the network side
+							if (tempGrp && tempDstId == tg && blockList.check(tempSrcId)) {
+								std::string callsign = lookup->find(tempSrcId);
+								LogMessage("Data from %s (%u) on Icom Network blocked", callsign.c_str(), tempSrcId);
+							} else if (tempGrp && tempDstId == tg && loopDetect.check(nxdnUser(tempSrcId), "")) {
+								// Blocked for looping, already logged
+							} else if (tempGrp && tempDstId == tg) {
 								// Save the grp, src and dest for use in the NXDN Protocol messages
 								grp   = tempGrp;
 								srcId = tempSrcId;
@@ -392,6 +482,7 @@ void CNXDNReflector::run()
 								LogMessage("Transmission from %s on Icom Network to %s%u", callsign.c_str(), grp ? "TG " : "", dstId);
 
 								active = ACTIVE_ICOM;
+								loopDetect.start(nxdnUser(srcId), "");
 							}
 						}
 						if ((buffer[0U] & 0xF0U) == 0x90U && buffer[2U] == 0x09U) {
@@ -399,7 +490,13 @@ void CNXDNReflector::run()
 							unsigned short tempSrcId = (buffer[5U] << 8) | buffer[6U];
 							unsigned short tempDstId = (buffer[7U] << 8) | buffer[8U];
 
-							if (tempGrp && tempDstId == tg) {
+							// Blocked user on the network side
+							if (tempGrp && tempDstId == tg && blockList.check(tempSrcId)) {
+								std::string callsign = lookup->find(tempSrcId);
+								LogMessage("Data from %s (%u) on Icom Network blocked", callsign.c_str(), tempSrcId);
+							} else if (tempGrp && tempDstId == tg && loopDetect.check(nxdnUser(tempSrcId), "")) {
+								// Blocked for looping, already logged
+							} else if (tempGrp && tempDstId == tg) {
 								// Save the grp, src and dest for use in the NXDN Protocol messages
 								grp   = tempGrp;
 								srcId = tempSrcId;
@@ -409,12 +506,14 @@ void CNXDNReflector::run()
 								LogMessage("Transmission from %s on Icom Network to %s%u", callsign.c_str(), grp ? "TG " : "", dstId);
 
 								active = ACTIVE_ICOM;
+								loopDetect.start(nxdnUser(srcId), "");
 							}
 						}
 					}
 
 					if (active == ACTIVE_ICOM) {
 						watchdogTimer.start();
+						loopDetect.touch();
 
 						for (std::vector<CNXDNRepeater*>::const_iterator it = m_repeaters.begin(); it != m_repeaters.end(); ++it)
 							nxdnNetwork.write(buffer, len, srcId, dstId, grp, (*it)->m_addr, (*it)->m_addrLen);
@@ -426,11 +525,13 @@ void CNXDNReflector::run()
 							LogMessage("Received end of transmission");
 							active = ACTIVE_NONE;
 							watchdogTimer.stop();
+							loopDetect.end();
 						}
 						if ((buffer[0U] & 0xF0U) == 0x90U && buffer[2U] == 0x08U) {
 							LogMessage("Received end of transmission");
 							active = ACTIVE_NONE;
 							watchdogTimer.stop();
+							loopDetect.end();
 						}
 					}
 				}
@@ -447,7 +548,13 @@ void CNXDNReflector::run()
 							unsigned short tempSrcId = (buffer[8U] << 8) | buffer[9U];
 							unsigned short tempDstId = (buffer[10U] << 8) | buffer[11U];
 
-							if (tempGrp && tempDstId == tg) {
+							// Blocked user on the network side
+							if (tempGrp && tempDstId == tg && blockList.check(tempSrcId)) {
+								std::string callsign = lookup->find(tempSrcId);
+								LogMessage("Data from %s (%u) on Kenwood Network blocked", callsign.c_str(), tempSrcId);
+							} else if (tempGrp && tempDstId == tg && loopDetect.check(nxdnUser(tempSrcId), "")) {
+								// Blocked for looping, already logged
+							} else if (tempGrp && tempDstId == tg) {
 								// Save the grp, src and dest for use in the NXDN Protocol messages
 								grp   = tempGrp;
 								srcId = tempSrcId;
@@ -457,6 +564,7 @@ void CNXDNReflector::run()
 								LogMessage("Transmission from %s on Kenwood Network to %s%u", callsign.c_str(), grp ? "TG " : "", dstId);
 
 								active = ACTIVE_KENWOOD;
+								loopDetect.start(nxdnUser(srcId), "");
 							}
 						}
 						if ((buffer[0U] & 0xF0U) == 0x90U && buffer[2U] == 0x09U) {
@@ -464,7 +572,13 @@ void CNXDNReflector::run()
 							unsigned short tempSrcId = (buffer[5U] << 8) | buffer[6U];
 							unsigned short tempDstId = (buffer[7U] << 8) | buffer[8U];
 
-							if (tempGrp && tempDstId == tg) {
+							// Blocked user on the network side
+							if (tempGrp && tempDstId == tg && blockList.check(tempSrcId)) {
+								std::string callsign = lookup->find(tempSrcId);
+								LogMessage("Data from %s (%u) on Kenwood Network blocked", callsign.c_str(), tempSrcId);
+							} else if (tempGrp && tempDstId == tg && loopDetect.check(nxdnUser(tempSrcId), "")) {
+								// Blocked for looping, already logged
+							} else if (tempGrp && tempDstId == tg) {
 								// Save the grp, src and dest for use in the NXDN Protocol messages
 								grp   = tempGrp;
 								srcId = tempSrcId;
@@ -474,12 +588,14 @@ void CNXDNReflector::run()
 								LogMessage("Transmission from %s on Kenwood Network to %s%u", callsign.c_str(), grp ? "TG " : "", dstId);
 
 								active = ACTIVE_KENWOOD;
+								loopDetect.start(nxdnUser(srcId), "");
 							}
 						}
 					}
 
 					if (active == ACTIVE_KENWOOD) {
 						watchdogTimer.start();
+						loopDetect.touch();
 
 						for (std::vector<CNXDNRepeater*>::const_iterator it = m_repeaters.begin(); it != m_repeaters.end(); ++it)
 							nxdnNetwork.write(buffer, len, srcId, dstId, grp, (*it)->m_addr, (*it)->m_addrLen);
@@ -491,11 +607,13 @@ void CNXDNReflector::run()
 							LogMessage("Received end of transmission");
 							active = ACTIVE_NONE;
 							watchdogTimer.stop();
+							loopDetect.end();
 						}
 						if ((buffer[0U] & 0xF0U) == 0x90U && buffer[2U] == 0x08U) {
 							LogMessage("Received end of transmission");
 							active = ACTIVE_NONE;
 							watchdogTimer.stop();
+							loopDetect.end();
 						}
 					}
 				}
@@ -515,6 +633,15 @@ void CNXDNReflector::run()
 				LogMessage("Removing %s (%s) disappeared", (*it)->m_callsign.c_str(),
 														   CUDPSocket::display((*it)->m_addr, buff, 80U));
 
+				// End the transmission if its repeater has gone
+				if (*it == current) {
+					watchdogTimer.stop();
+					current = NULL;
+					active = ACTIVE_NONE;
+					// Cut short by the timeout, not scored
+					loopDetect.cancel();
+				}
+
 				delete *it;
 				m_repeaters.erase(it);
 				break;
@@ -527,6 +654,41 @@ void CNXDNReflector::run()
 			watchdogTimer.stop();
 			current = NULL;
 			active = ACTIVE_NONE;
+
+			// Strike 3 removes the node
+			if (loopDetect.end())
+				removeLooper(loopAddr);
+		}
+
+		loopDetect.clock(ms);
+
+		blockedTimer.clock(ms);
+		if (blockedTimer.isRunning() && blockedTimer.hasExpired())
+			blockedTimer.stop();
+
+		if (blockList.clock(ms)) {
+			blockedNodes.clear();
+
+			// Drop linked nodes that are now blocked
+			for (std::vector<CNXDNRepeater*>::iterator it = m_repeaters.begin(); it != m_repeaters.end();) {
+				if (blockList.checkCallsign((*it)->m_callsign)) {
+					char buff[80U];
+					LogMessage("Removing %s (%s) blocked", (*it)->m_callsign.c_str(), CUDPSocket::display((*it)->m_addr, buff, 80U));
+
+					// End the transmission if its repeater has gone
+					if (*it == current) {
+						watchdogTimer.stop();
+						current = NULL;
+						active = ACTIVE_NONE;
+						loopDetect.cancel();
+					}
+
+					delete *it;
+					it = m_repeaters.erase(it);
+				} else {
+					++it;
+				}
+			}
 		}
 
 		dumpTimer.clock(ms);

@@ -18,6 +18,7 @@
 
 #include "YSFReflector.h"
 #include "BlockList.h"
+#include "LoopDetect.h"
 #include "StopWatch.h"
 #include "Network.h"
 #include "Version.h"
@@ -51,6 +52,17 @@ const char* DEFAULT_INI_FILE = "/etc/YSFReflector.ini";
 #include <cstdarg>
 #include <ctime>
 #include <cstring>
+#include <string>
+#include <unordered_set>
+
+// Loop detection user: the source callsign, or the node's until the source is known
+static std::string ysfUser(const unsigned char* src, const unsigned char* tag)
+{
+	if (::memcmp(src, "??????????", YSF_CALLSIGN_LENGTH) == 0)
+		return std::string((char*)tag, YSF_CALLSIGN_LENGTH);
+
+	return std::string((char*)src, YSF_CALLSIGN_LENGTH);
+}
 
 int main(int argc, char** argv)
 {
@@ -181,6 +193,12 @@ void CYSFReflector::run()
 	CBlockList blockList(m_conf.getBlockListFile(), m_conf.getBlockListTime());
 	blockList.start();
 
+	CLoopDetect loopDetect;
+
+	// Address of the node of the transmission being scored, strike 3 removes it
+	sockaddr_storage loopAddr;
+	::memset(&loopAddr, 0x00U, sizeof(sockaddr_storage));
+
 	network.setCount(0);
 	
 	CStopWatch stopWatch;
@@ -203,6 +221,14 @@ void CYSFReflector::run()
 
 	bool blocked = false;
 
+	// Last blocked transmission, so it is only logged once
+	unsigned char blockedTag[YSF_CALLSIGN_LENGTH];
+	unsigned char blockedSrc[YSF_CALLSIGN_LENGTH];
+	CTimer blockedTimer(1000U, 0U, 1500U);
+
+	// Blocked nodes already logged, stops their polls flooding the log
+	std::unordered_set<std::string> blockedNodes;
+
 	for (;;) {
 		unsigned char buffer[200U];
 		sockaddr_storage addr;
@@ -211,7 +237,13 @@ void CYSFReflector::run()
 		unsigned int len = network.readData(buffer, 200U, addr, addrLen);
 		if (len > 0U) {
 			CYSFRepeater* rpt = findRepeater(addr);
-			if (::memcmp(buffer, "YSFP", 4U) == 0) {
+			// Refuse to link a blocked node, or one barred for looping
+			if (::memcmp(buffer, "YSFP", 4U) == 0 && rpt == NULL && (blockList.check(buffer + 4U) || loopDetect.checkLink(std::string((char*)(buffer + 4U), 10U)))) {
+				char buff[80U];
+				CUDPSocket::display(addr, buff, 80U);
+				if (blockedNodes.insert(std::string(buff)).second)
+					LogMessage("Linking of %10.10s (%s) blocked", buffer + 4U, buff);
+			} else if (::memcmp(buffer, "YSFP", 4U) == 0) {
 				if (rpt == NULL) {
 					rpt = new CYSFRepeater;
 					rpt->m_callsign = std::string((char*)(buffer + 4U), 10U);
@@ -222,12 +254,17 @@ void CYSFReflector::run()
 
 					char buff[80U];
 					LogMessage("Adding %s (%s)", rpt->m_callsign.c_str(), CUDPSocket::display(addr, buff, 80U));
+					blockedNodes.erase(std::string(buff));
 				}
 				rpt->m_timer.start();
 				network.writePoll(addr, addrLen);
 			} else if (::memcmp(buffer + 0U, "YSFU", 4U) == 0 && rpt != NULL) {
 				char buff[80U];
 				LogMessage("Removing %s (%s) unlinked", rpt->m_callsign.c_str(), CUDPSocket::display(addr, buff, 80U));
+
+				// Cut short by the unlink, not scored
+				if (CUDPSocket::match(loopAddr, rpt->m_addr))
+					loopDetect.cancel();
 
 				for (std::vector<CYSFRepeater*>::iterator it = m_repeaters.begin(); it != m_repeaters.end(); ++it) {
 					if (CUDPSocket::match((*it)->m_addr, rpt->m_addr)) {
@@ -251,11 +288,29 @@ void CYSFReflector::run()
 					else
 						::memcpy(dst, "??????????", YSF_CALLSIGN_LENGTH);
 
-					blocked = blockList.check(src);
-					if (blocked)
-						LogMessage("Data from %10.10s at %10.10s blocked", src, tag);
-					else
+					// Loop detection keys: the user (or the node until the user is known) and the linked node
+					std::string user = ysfUser(src, tag);
+					std::string node = rpt->m_callsign;
+
+					// Block the user or the node they are on
+					bool listed = blockList.check(src) || blockList.check(tag);
+					blocked = listed || loopDetect.check(user, node);
+					if (listed) {
+						if (!blockedTimer.isRunning() || ::memcmp(tag, blockedTag, YSF_CALLSIGN_LENGTH) != 0 || ::memcmp(src, blockedSrc, YSF_CALLSIGN_LENGTH) != 0) {
+							LogMessage("Data from %10.10s at %10.10s blocked", src, tag);
+							::memcpy(blockedTag, tag, YSF_CALLSIGN_LENGTH);
+							::memcpy(blockedSrc, src, YSF_CALLSIGN_LENGTH);
+						}
+
+						blockedTimer.start();
+
+						if ((buffer[34U] & 0x01U) == 0x01U)
+							blockedTimer.stop();
+					} else if (!blocked) {
 						LogMessage("Received data from %10.10s to %10.10s at %10.10s", src, dst, tag);
+						loopDetect.start(user, node);
+						::memcpy(&loopAddr, &addr, sizeof(sockaddr_storage));
+					}
 				} else {
 					if (::memcmp(tag, buffer + 4U, YSF_CALLSIGN_LENGTH) == 0) {
 						bool changed = false;
@@ -271,17 +326,34 @@ void CYSFReflector::run()
 						}
 
 						if (changed) {
-							blocked = blockList.check(src);
-							if (blocked)
-								LogMessage("Data from %10.10s at %10.10s blocked", src, tag);
-							else
+							std::string user = ysfUser(src, tag);
+							loopDetect.setUser(user);
+
+							// Block the user or the node they are on
+							bool listed = blockList.check(src) || blockList.check(tag);
+							blocked = listed || loopDetect.check(user, rpt->m_callsign);
+							if (blocked) {
+								// Blocked transmissions aren't scored, and the next packet is judged afresh
+								loopDetect.cancel();
+								watchdogTimer.stop();
+								if (listed) {
+									LogMessage("Data from %10.10s at %10.10s blocked", src, tag);
+
+									// Logged, the rest of this transmission isn't
+									::memcpy(blockedTag, tag, YSF_CALLSIGN_LENGTH);
+									::memcpy(blockedSrc, src, YSF_CALLSIGN_LENGTH);
+									blockedTimer.start();
+								}
+							} else {
 								LogMessage("Received data from %10.10s to %10.10s at %10.10s", src, dst, tag);
+							}
 						}
 					}
 				}
 
 				if (!blocked) {
 					watchdogTimer.start();
+					loopDetect.touch();
 
 					for (std::vector<CYSFRepeater*>::const_iterator it = m_repeaters.begin(); it != m_repeaters.end(); ++it) {
 						if (!CUDPSocket::match((*it)->m_addr, addr))
@@ -291,6 +363,10 @@ void CYSFReflector::run()
 					if ((buffer[34U] & 0x01U) == 0x01U) {
 						LogMessage("Received end of transmission");
 						watchdogTimer.stop();
+
+						// Strike 3 removes the node
+						if (loopDetect.end() && removeRepeater(loopAddr, "loop detected"))
+							network.setCount(m_repeaters.size());
 					}
 				}
 			}
@@ -316,6 +392,10 @@ void CYSFReflector::run()
 				LogMessage("Removing %s (%s) disappeared", (*it)->m_callsign.c_str(),
 														   CUDPSocket::display((*it)->m_addr, buff, 80U));
 
+				// Cut short by the timeout, not scored
+				if (CUDPSocket::match(loopAddr, (*it)->m_addr))
+					loopDetect.cancel();
+
 				delete *it;
 				m_repeaters.erase(it);
 				network.setCount(m_repeaters.size());
@@ -327,7 +407,17 @@ void CYSFReflector::run()
 		if (watchdogTimer.isRunning() && watchdogTimer.hasExpired()) {
 			LogMessage("Network watchdog has expired");
 			watchdogTimer.stop();
+
+			// Strike 3 removes the node
+			if (loopDetect.end() && removeRepeater(loopAddr, "loop detected"))
+				network.setCount(m_repeaters.size());
 		}
+
+		loopDetect.clock(ms);
+
+		blockedTimer.clock(ms);
+		if (blockedTimer.isRunning() && blockedTimer.hasExpired())
+			blockedTimer.stop();
 
 		dumpTimer.clock(ms);
 		if (dumpTimer.hasExpired()) {
@@ -335,7 +425,27 @@ void CYSFReflector::run()
 			dumpTimer.start();
 		}
 
-		blockList.clock(ms);
+		if (blockList.clock(ms)) {
+			blockedNodes.clear();
+
+			// Drop linked nodes that are now blocked
+			for (std::vector<CYSFRepeater*>::iterator it = m_repeaters.begin(); it != m_repeaters.end();) {
+				if (blockList.check((const unsigned char*)(*it)->m_callsign.c_str())) {
+					char buff[80U];
+					LogMessage("Removing %s (%s) blocked", (*it)->m_callsign.c_str(), CUDPSocket::display((*it)->m_addr, buff, 80U));
+
+					if (CUDPSocket::match(loopAddr, (*it)->m_addr))
+						loopDetect.cancel();
+
+					delete *it;
+					it = m_repeaters.erase(it);
+				} else {
+					++it;
+				}
+			}
+
+			network.setCount(m_repeaters.size());
+		}
 
 		if (ms < 5U)
 			CThread::sleep(5U);
@@ -344,6 +454,22 @@ void CYSFReflector::run()
 	network.close();
 
 	::LogFinalise();
+}
+
+bool CYSFReflector::removeRepeater(const sockaddr_storage& addr, const char* reason)
+{
+	for (std::vector<CYSFRepeater*>::iterator it = m_repeaters.begin(); it != m_repeaters.end(); ++it) {
+		if (CUDPSocket::match((*it)->m_addr, addr)) {
+			char buff[80U];
+			LogMessage("Removing %s (%s) %s", (*it)->m_callsign.c_str(), CUDPSocket::display((*it)->m_addr, buff, 80U), reason);
+
+			delete *it;
+			m_repeaters.erase(it);
+			return true;
+		}
+	}
+
+	return false;
 }
 
 CYSFRepeater* CYSFReflector::findRepeater(const sockaddr_storage& addr) const

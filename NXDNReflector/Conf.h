@@ -63,6 +63,10 @@ public:
   unsigned short getKenwoodTGDisable() const;
   bool           getKenwoodDebug() const;
 
+  // The Block List section
+  std::string    getBlockListFile() const;
+  unsigned int   getBlockListTime() const;
+
 private:
   std::string    m_file;
   unsigned short m_tg;
@@ -91,6 +95,9 @@ private:
   unsigned short m_kenwoodTGEnable;
   unsigned short m_kenwoodTGDisable;
   bool           m_kenwoodDebug;
+
+  std::string    m_blockListFile;
+  unsigned int   m_blockListTime;
 };
 
 #endif

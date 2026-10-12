@@ -33,7 +33,8 @@ enum SECTION {
   SECTION_LOG,
   SECTION_NETWORK,
   SECTION_ICOM_NETWORK,
-  SECTION_KENWOOD_NETWORK
+  SECTION_KENWOOD_NETWORK,
+  SECTION_BLOCKLIST
 };
 
 CConf::CConf(const std::string& file) :
@@ -58,7 +59,9 @@ m_kenwoodEnabled(false),
 m_kenwoodAddress(),
 m_kenwoodTGEnable(0U),
 m_kenwoodTGDisable(0U),
-m_kenwoodDebug(false)
+m_kenwoodDebug(false),
+m_blockListFile(),
+m_blockListTime(5U)
 {
 }
 
@@ -94,6 +97,8 @@ bool CConf::read()
 			  section = SECTION_ICOM_NETWORK;
 		  else if (::strncmp(buffer, "[Kenwood Network]", 17U) == 0)
 			  section = SECTION_KENWOOD_NETWORK;
+		  else if (::strncmp(buffer, "[Block List]", 12U) == 0)
+			  section = SECTION_BLOCKLIST;
 		  else
 			  section = SECTION_NONE;
 
@@ -173,6 +178,11 @@ bool CConf::read()
 			  m_kenwoodTGDisable = (unsigned short)::atoi(value);
 		  else if (::strcmp(key, "Debug") == 0)
 			  m_kenwoodDebug = ::atoi(value) == 1;
+	  } else if (section == SECTION_BLOCKLIST) {
+		  if (::strcmp(key, "File") == 0)
+			  m_blockListFile = value;
+		  else if (::strcmp(key, "Time") == 0)
+			  m_blockListTime = (unsigned int)::atoi(value);
 	  }
   }
 
@@ -284,4 +294,14 @@ unsigned short CConf::getKenwoodTGDisable() const
 bool CConf::getKenwoodDebug() const
 {
 	return m_kenwoodDebug;
+}
+
+std::string CConf::getBlockListFile() const
+{
+	return m_blockListFile;
+}
+
+unsigned int CConf::getBlockListTime() const
+{
+	return m_blockListTime;
 }

@@ -17,6 +17,7 @@
  */
 
 #include "BlockList.h"
+#include "Callsign.h"
 #include "YSFDefines.h"
 #include "Log.h"
 
@@ -25,6 +26,7 @@
 #include <cstdio>
 #include <cassert>
 #include <cstring>
+#include <cctype>
 
 const int BUFFER_SIZE = 500;
 
@@ -57,38 +59,43 @@ bool CBlockList::check(const unsigned char* callsign) const
 	if (m_callsigns.empty())
 		return false;
 
+	// By station: M1AB blocks M1AB-ND and M1AB-RPT, not M1ABC
 	std::string call = std::string((char*)callsign, YSF_CALLSIGN_LENGTH);
-	std::for_each(call.begin(), call.end(), [](char& c) {
-		c = std::toupper(c);
-	});
 
 	for (std::vector<std::string>::const_iterator it = m_callsigns.cbegin(); it != m_callsigns.cend(); ++it) {
-		const std::string blocked = *it;
-		if (call.find(blocked) != std::string::npos)
+		if (callsignMatches(call, *it))
 			return true;
 	}
 
 	return false;
 }
 
-void CBlockList::clock(unsigned int ms)
+bool CBlockList::clock(unsigned int ms)
 {
 	m_timer.clock(ms);
 
 	if (m_timer.isRunning() && m_timer.hasExpired()) {
-		loadFile();
+		bool changed = loadFile();
 		m_timer.start();
+		return changed;
 	}
+
+	return false;
 }
 
 bool CBlockList::loadFile()
 {
 	FILE* fp = ::fopen(m_file.c_str(), "rt");
 	if (fp == NULL) {
+		// Forget the checksum, so the same file put back is reloaded
+		m_checksum = 0U;
+
 		if (!m_callsigns.empty()) {
 			m_callsigns.clear();
 			LogInfo("Loaded %u callsigns from the block list", m_callsigns.size());
+			return true;
 		}
+
 		return false;
 	}
 
@@ -119,21 +126,18 @@ bool CBlockList::loadFile()
 	m_callsigns.clear();
 
 	while (::fgets(buffer, BUFFER_SIZE, fp) != NULL) {
-		char* p;
-		if ((p = ::strchr(buffer, '\n')) != NULL)
-			*p = '\0';
-		if ((p = ::strchr(buffer, '\r')) != NULL)
-			*p = '\0';
+		// First word only, split as XLXd does on whitespace or a comma. Skip blank lines and comments
+		char* entry = ::strtok(buffer, " ,\t\r\n\f\v");
+		if (entry == NULL || entry[0U] == '#')
+			continue;
 
-		if (::strlen(buffer) > 0U) {
-			std::string callsign = std::string(buffer);
+		std::string callsign = std::string(entry);
 
-			std::for_each(callsign.begin(), callsign.end(), [](char& c) {
-				c = std::toupper(c);
-			});
+		std::for_each(callsign.begin(), callsign.end(), [](char& c) {
+			c = std::toupper(c);
+		});
 
-			m_callsigns.push_back(callsign);
-		}
+		m_callsigns.push_back(callsign);
 	}
 
 	::fclose(fp);

@@ -1,0 +1,21 @@
+##############################################################################
+#  YSFReflector block list
+#
+#  Copy to BlockList.txt (see [Block List] in YSFReflector.ini). Re-read every
+#  Time minutes, no restart needed. Compatible with an xlxd.blacklist.
+#
+#  One entry per line, first word only. '#' comments and blank lines ignored.
+#  Blocks users and the nodes they link through.
+#
+#  N0CALL      the station: N0CALL, N0CALL-ND, N0CALL-RPT, N0CALL/P, DL/N0CALL
+#              (not N0CALLX)
+#  N0CALL-ND   just that callsign
+#  N0*         every callsign starting N0
+#  *           everyone
+#
+#  Remove the leading '#' to use an example.
+##############################################################################
+
+#N0CALL
+#N0CALL-ND
+#N0*

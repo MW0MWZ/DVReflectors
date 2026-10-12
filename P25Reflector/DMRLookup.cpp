@@ -17,6 +17,7 @@
 */
 
 #include "DMRLookup.h"
+#include "Callsign.h"
 #include "Timer.h"
 #include "Log.h"
 
@@ -31,6 +32,7 @@ m_filename(filename),
 m_reloadTime(reloadTime),
 m_table(),
 m_mutex(),
+m_generation(0U),
 m_stop(false)
 {
 }
@@ -103,6 +105,45 @@ std::string CDMRLookup::find(unsigned int id)
 	return callsign;
 }
 
+std::vector<unsigned int> CDMRLookup::findIds(const std::string& callsign)
+{
+	std::vector<unsigned int> ids;
+
+	m_mutex.lock();
+
+	for (std::unordered_map<unsigned int, std::string>::const_iterator it = m_table.cbegin(); it != m_table.cend(); ++it) {
+		// By station, M1AB also finds Ids registered as M1AB-1 or M1AB/P
+		if (callsignMatches(it->second, callsign))
+			ids.push_back(it->first);
+	}
+
+	m_mutex.unlock();
+
+	return ids;
+}
+
+unsigned int CDMRLookup::getCount()
+{
+	m_mutex.lock();
+
+	unsigned int count = (unsigned int)m_table.size();
+
+	m_mutex.unlock();
+
+	return count;
+}
+
+unsigned int CDMRLookup::getGeneration()
+{
+	m_mutex.lock();
+
+	unsigned int generation = m_generation;
+
+	m_mutex.unlock();
+
+	return generation;
+}
+
 bool CDMRLookup::load()
 {
 	FILE* fp = ::fopen(m_filename.c_str(), "rt");
@@ -132,6 +173,9 @@ bool CDMRLookup::load()
 			m_table[id] = std::string(p2);
 		}
 	}
+
+	// Lets the block list spot a reload
+	m_generation++;
 
 	m_mutex.unlock();
 

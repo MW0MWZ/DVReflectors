@@ -48,6 +48,10 @@ public:
   unsigned short getNetworkPort() const;
   bool         getNetworkDebug() const;
 
+  // The Block List section
+  std::string  getBlockListFile() const;
+  unsigned int getBlockListTime() const;
+
 private:
   std::string  m_file;
   bool         m_daemon;
@@ -63,6 +67,9 @@ private:
 
   unsigned short m_networkPort;
   bool         m_networkDebug;
+
+  std::string  m_blockListFile;
+  unsigned int m_blockListTime;
 };
 
 #endif

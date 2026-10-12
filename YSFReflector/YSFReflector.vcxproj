@@ -147,7 +147,9 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="BlockList.h" />
+    <ClInclude Include="Callsign.h" />
     <ClInclude Include="Conf.h" />
+    <ClInclude Include="LoopDetect.h" />
     <ClInclude Include="Log.h" />
     <ClInclude Include="Network.h" />
     <ClInclude Include="StopWatch.h" />
@@ -163,6 +165,7 @@
     <ClCompile Include="BlockList.cpp" />
     <ClCompile Include="Conf.cpp" />
     <ClCompile Include="Log.cpp" />
+    <ClCompile Include="LoopDetect.cpp" />
     <ClCompile Include="Network.cpp" />
     <ClCompile Include="StopWatch.cpp" />
     <ClCompile Include="Thread.cpp" />

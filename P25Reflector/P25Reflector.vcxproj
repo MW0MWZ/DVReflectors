@@ -19,8 +19,11 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="BlockList.h" />
+    <ClInclude Include="Callsign.h" />
     <ClInclude Include="Conf.h" />
     <ClInclude Include="DMRLookup.h" />
+    <ClInclude Include="LoopDetect.h" />
     <ClInclude Include="Log.h" />
     <ClInclude Include="Mutex.h" />
     <ClInclude Include="Network.h" />
@@ -33,9 +36,11 @@
     <ClInclude Include="Version.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="BlockList.cpp" />
     <ClCompile Include="Conf.cpp" />
     <ClCompile Include="DMRLookup.cpp" />
     <ClCompile Include="Log.cpp" />
+    <ClCompile Include="LoopDetect.cpp" />
     <ClCompile Include="Mutex.cpp" />
     <ClCompile Include="Network.cpp" />
     <ClCompile Include="P25Reflector.cpp" />

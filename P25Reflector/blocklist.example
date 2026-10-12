@@ -1,0 +1,27 @@
+##############################################################################
+#  P25Reflector block list
+#
+#  Copy to BlockList.txt (see [Block List] in P25Reflector.ini). Re-read every
+#  Time minutes, no restart needed. Compatible with an xlxd.blacklist.
+#
+#  One entry per line, first word only. '#' comments and blank lines ignored.
+#  Blocks users and the nodes they link through.
+#
+#  N0CALL      the station: N0CALL, N0CALL-ND, N0CALL-RPT, N0CALL/P, DL/N0CALL
+#              (not N0CALLX)
+#  N0CALL-ND   just that callsign
+#  N0*         every callsign starting N0
+#  *           everyone
+#  1234567     a DMR Id
+#  235*        every Id starting 235, wildcards match Ids too
+#
+#  Callsigns block every Id registered to them in the Id lookup file.
+#
+#  Remove the leading '#' to use an example.
+##############################################################################
+
+#N0CALL
+#N0CALL-ND
+#N0*
+#1234567
+#235*

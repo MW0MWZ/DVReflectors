@@ -35,7 +35,7 @@ public:
 
 	bool check(const unsigned char* callsign) const;
 
-	void clock(unsigned int ms);
+	bool clock(unsigned int ms);
 
 private:
 	std::string              m_file;

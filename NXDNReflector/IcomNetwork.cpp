@@ -66,6 +66,9 @@ bool CIcomNetwork::write(const unsigned char* data, unsigned int len)
 {
 	assert(data != NULL);
 
+	if (len < 33U)
+		return false;
+
 	unsigned char buffer[110U];
 	::memset(buffer, 0x00U, 110U);
 
@@ -78,17 +81,20 @@ bool CIcomNetwork::write(const unsigned char* data, unsigned int len)
 	buffer[6U] = 0x08U;
 	buffer[7U] = 0xE0U;
 
-	if ((data[9U] & 0x02U) == 0x02U) {
+	if ((data[0U] & 0xF0U) == 0x90U) {
+		// Data
 		buffer[37U] = 0x23U;
 		buffer[38U] = 0x02U;
 		buffer[39U] = 0x18U;
 	} else {
+		// Voice, header and trailer flagged
+		bool header = (data[0U] == 0x81U || data[0U] == 0x83U) && (data[5U] == 0x01U || data[5U] == 0x08U);
 		buffer[37U] = 0x23U;
-		buffer[38U] = (data[9U] & 0x0CU) != 0x00U ? 0x1CU : 0x10U;
+		buffer[38U] = header ? 0x1CU : 0x10U;
 		buffer[39U] = 0x21U;
 	}
 
-	::memcpy(buffer + 40U, data + 10U, 33U);
+	::memcpy(buffer + 40U, data, 33U);
 
 	if (m_debug)
 		CUtils::dump(1U, "Icom Network Data Sent", buffer, 102U);
@@ -127,7 +133,7 @@ unsigned int CIcomNetwork::read(unsigned char* data)
 	return 33U;
 }
 
-void CIcomNetwork::clock(unsigned int ms)
+void CIcomNetwork::clock(unsigned int)
 {
 }
 

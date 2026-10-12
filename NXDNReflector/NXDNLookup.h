@@ -24,6 +24,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 class CNXDNLookup : public CThread {
 public:
@@ -36,6 +37,15 @@ public:
 
 	std::string find(unsigned int id);
 
+	// All Ids registered to a callsign's station
+	std::vector<unsigned int> findIds(const std::string& callsign);
+
+	// Number of Ids in the table
+	unsigned int getCount();
+
+	// Bumped on every reload
+	unsigned int getGeneration();
+
 	bool exists(unsigned int id);
 
 	void stop();
@@ -45,6 +55,7 @@ private:
 	unsigned int                                  m_reloadTime;
 	std::unordered_map<unsigned int, std::string> m_table;
 	CMutex                                        m_mutex;
+	unsigned int                                  m_generation;
 	bool                                          m_stop;
 
 	bool load();

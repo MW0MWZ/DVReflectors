@@ -17,6 +17,7 @@
 */
 
 #include "NXDNLookup.h"
+#include "Callsign.h"
 #include "Timer.h"
 #include "Log.h"
 
@@ -31,6 +32,7 @@ m_filename(filename),
 m_reloadTime(reloadTime),
 m_table(),
 m_mutex(),
+m_generation(0U),
 m_stop(false)
 {
 }
@@ -114,6 +116,45 @@ bool CNXDNLookup::exists(unsigned int id)
 	return found;
 }
 
+std::vector<unsigned int> CNXDNLookup::findIds(const std::string& callsign)
+{
+	std::vector<unsigned int> ids;
+
+	m_mutex.lock();
+
+	for (std::unordered_map<unsigned int, std::string>::const_iterator it = m_table.cbegin(); it != m_table.cend(); ++it) {
+		// By station, M1AB also finds Ids registered as M1AB-1 or M1AB/P
+		if (callsignMatches(it->second, callsign))
+			ids.push_back(it->first);
+	}
+
+	m_mutex.unlock();
+
+	return ids;
+}
+
+unsigned int CNXDNLookup::getCount()
+{
+	m_mutex.lock();
+
+	unsigned int count = (unsigned int)m_table.size();
+
+	m_mutex.unlock();
+
+	return count;
+}
+
+unsigned int CNXDNLookup::getGeneration()
+{
+	m_mutex.lock();
+
+	unsigned int generation = m_generation;
+
+	m_mutex.unlock();
+
+	return generation;
+}
+
 bool CNXDNLookup::load()
 {
 	FILE* fp = ::fopen(m_filename.c_str(), "rt");
@@ -145,6 +186,9 @@ bool CNXDNLookup::load()
 			}
 		}
 	}
+
+	// Lets the block list spot a reload
+	m_generation++;
 
 	m_mutex.unlock();
 

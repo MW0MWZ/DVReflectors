@@ -32,6 +32,7 @@ public:
 
 	bool open();
 
+	// data is the 33 byte NXDN payload
 	bool write(const unsigned char* data, unsigned int len);
 
 	unsigned int read(unsigned char* data);

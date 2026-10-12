@@ -17,6 +17,8 @@
 */
 
 #include "P25Reflector.h"
+#include "BlockList.h"
+#include "LoopDetect.h"
 #include "StopWatch.h"
 #include "DMRLookup.h"
 #include "Network.h"
@@ -52,6 +54,8 @@ const char* DEFAULT_INI_FILE = "/etc/P25Reflector.ini";
 #include <ctime>
 #include <cstring>
 #include <algorithm>
+#include <string>
+#include <unordered_set>
 
 int main(int argc, char** argv)
 {
@@ -182,6 +186,20 @@ void CP25Reflector::run()
 	CDMRLookup* lookup = new CDMRLookup(m_conf.getLookupName(), m_conf.getLookupTime());
 	lookup->read();
 
+	CBlockList blockList(m_conf.getBlockListFile(), m_conf.getBlockListTime(), lookup);
+	blockList.start();
+
+	CLoopDetect loopDetect;
+
+	// Address of the node of the transmission being scored, strike 3 removes it
+	sockaddr_storage loopAddr;
+	::memset(&loopAddr, 0x00U, sizeof(sockaddr_storage));
+
+	// Loop detection user: their callsign, so all their Ids, or the Id if it isn't in the lookup
+	auto p25User = [lookup](unsigned int id) -> std::string {
+		return lookup->find(id);
+	};
+
 	CStopWatch stopWatch;
 	stopWatch.start();
 
@@ -197,6 +215,31 @@ void CP25Reflector::run()
 
 	CTimer watchdogTimer(1000U, 0U, 1500U);
 
+	CP25Repeater* blocked = NULL;
+	CTimer blockedTimer(1000U, 0U, 1500U);
+
+	// Blocked nodes already logged, stops their polls flooding the log
+	std::unordered_set<std::string> blockedNodes;
+
+	// Strike 3: drop the node the loop came through, by address as callsigns can be shared
+	auto removeLooper = [&](const sockaddr_storage& addr) {
+		for (std::vector<CP25Repeater*>::iterator it = m_repeaters.begin(); it != m_repeaters.end(); ++it) {
+			if (CUDPSocket::match((*it)->m_addr, addr)) {
+				char buff[80U];
+				LogMessage("Removing %s (%s) loop detected", (*it)->m_callsign.c_str(), CUDPSocket::display((*it)->m_addr, buff, 80U));
+
+				if (*it == blocked) {
+					blockedTimer.stop();
+					blocked = NULL;
+				}
+
+				delete *it;
+				m_repeaters.erase(it);
+				break;
+			}
+		}
+	};
+
 	unsigned char lcf = 0U;
 	unsigned int srcId = 0U;
 	unsigned int dstId = 0U;
@@ -210,7 +253,13 @@ void CP25Reflector::run()
 		if (len > 0U) {
 			CP25Repeater* rpt = findRepeater(addr);
 
-			if (buffer[0U] == 0xF0U) {
+			// Refuse to link a blocked node, or one barred for looping
+			if (buffer[0U] == 0xF0U && rpt == NULL && (blockList.checkCallsign(std::string((char*)(buffer + 1U), 10U)) || loopDetect.checkLink(std::string((char*)(buffer + 1U), 10U)))) {
+				char buff[80U];
+				CUDPSocket::display(addr, buff, 80U);
+				if (blockedNodes.insert(std::string(buff)).second)
+					LogMessage("Linking of %10.10s (%s) blocked", buffer + 1U, buff);
+			} else if (buffer[0U] == 0xF0U) {
 				if (rpt == NULL) {
 					rpt = new CP25Repeater;
 					rpt->m_timer.start();
@@ -221,6 +270,7 @@ void CP25Reflector::run()
 
 					char buff[80U];
 					LogMessage("Adding %s (%s)", rpt->m_callsign.c_str(), CUDPSocket::display(addr, buff, 80U));
+					blockedNodes.erase(std::string(buff));
 				} else {
 					rpt->m_timer.start();
 				}
@@ -233,6 +283,15 @@ void CP25Reflector::run()
 
 				for (std::vector<CP25Repeater*>::iterator it = m_repeaters.begin(); it != m_repeaters.end(); ++it) {
 					if (CUDPSocket::match((*it)->m_addr, rpt->m_addr)) {
+						// End the transmission if its repeater has gone
+						if (*it == current) {
+							watchdogTimer.stop();
+							current = NULL;
+							// Cut short by the unlink, not scored
+							loopDetect.cancel();
+						}
+						if (*it == blocked)
+							blocked = NULL;
 						delete *it;
 						m_repeaters.erase(it);
 						break;
@@ -241,16 +300,31 @@ void CP25Reflector::run()
 			} else if (rpt != NULL) {
 				rpt->m_timer.start();
 
-				if (current == NULL) {
+				if (rpt == blocked) {
+					// Drop the rest of a blocked transmission
+					blockedTimer.start();
+
+					if (buffer[0U] == 0x80U) {
+						blockedTimer.stop();
+						blocked = NULL;
+					}
+				} else if (current == NULL && loopDetect.check("", rpt->m_callsign)) {
+					// Node blocked for looping, drop this transmission
+					blocked = rpt;
+					blockedTimer.start();
+				} else if (current == NULL) {
 					current   = rpt;
 					displayed = false;
 					seen64    = false;
 					seen65    = false;
 					LogMessage("Transmission started from %s", current->m_callsign.c_str());
+					loopDetect.start("", rpt->m_callsign);
+					::memcpy(&loopAddr, &rpt->m_addr, sizeof(sockaddr_storage));
 				}
 
 				if (current == rpt) {
 					watchdogTimer.start();
+					loopDetect.touch();
 
 					if (buffer[0U] == 0x64U && !seen64) {
 						lcf = buffer[1U];
@@ -271,23 +345,49 @@ void CP25Reflector::run()
 						displayed = true;
 
 						std::string callsign = lookup->find(srcId);
-						LogMessage("Transmission from %s at %s to %s%u", callsign.c_str(), current->m_callsign.c_str(), lcf == 0x00U ? "TG " : "", dstId);
+						// The source Id only arrives in the 0x66 record, block from here on
+						bool listed = blockList.check(srcId);
+						if (listed || loopDetect.check(p25User(srcId), current->m_callsign)) {
+							if (listed)
+								LogMessage("Data from %s (%u) at %s blocked", callsign.c_str(), srcId, current->m_callsign.c_str());
+
+							// Blocked transmissions aren't scored
+							loopDetect.cancel();
+
+							blocked = current;
+							blockedTimer.start();
+							watchdogTimer.stop();
+							current = NULL;
+						} else {
+							LogMessage("Transmission from %s at %s to %s%u", callsign.c_str(), current->m_callsign.c_str(), lcf == 0x00U ? "TG " : "", dstId);
+							loopDetect.setUser(p25User(srcId));
+						}
 					}
 
-					for (std::vector<CP25Repeater*>::const_iterator it = m_repeaters.begin(); it != m_repeaters.end(); ++it) {
-						if (!CUDPSocket::match(addr, (*it)->m_addr))
-							network.writeData(buffer, len, (*it)->m_addr, (*it)->m_addrLen);
+					if (current != NULL) {
+						for (std::vector<CP25Repeater*>::const_iterator it = m_repeaters.begin(); it != m_repeaters.end(); ++it) {
+							if (!CUDPSocket::match(addr, (*it)->m_addr))
+								network.writeData(buffer, len, (*it)->m_addr, (*it)->m_addrLen);
+						}
 					}
 
 					if (buffer[0U] == 0x80U) {
 						LogMessage("Received end of transmission");
 						watchdogTimer.stop();
 						current = NULL;
+
+						// Strike 3 removes the node
+						if (loopDetect.end())
+							removeLooper(loopAddr);
 					}
 				}
 			} else {
-				LogMessage("Data received from an unknown source");
-				CUtils::dump(2U, "Data", buffer, len);
+				char buff[80U];
+				// Stay quiet about traffic from blocked nodes
+				if (blockedNodes.count(std::string(CUDPSocket::display(addr, buff, 80U))) == 0U) {
+					LogMessage("Data received from an unknown source");
+					CUtils::dump(2U, "Data", buffer, len);
+				}
 			}
 		}
 
@@ -304,6 +404,15 @@ void CP25Reflector::run()
 				LogMessage("Removing %s (%s) disappeared", (*it)->m_callsign.c_str(),
 														   CUDPSocket::display((*it)->m_addr, buff, 80U));
 
+				// End the transmission if its repeater has gone
+				if (*it == current) {
+					watchdogTimer.stop();
+					current = NULL;
+					// Cut short by the timeout, not scored
+					loopDetect.cancel();
+				}
+				if (*it == blocked)
+					blocked = NULL;
 				delete *it;
 				m_repeaters.erase(it);
 				break;
@@ -315,6 +424,47 @@ void CP25Reflector::run()
 			LogMessage("Network watchdog has expired");
 			watchdogTimer.stop();
 			current = NULL;
+
+			// Strike 3 removes the node
+			if (loopDetect.end())
+				removeLooper(loopAddr);
+		}
+
+		loopDetect.clock(ms);
+
+		blockedTimer.clock(ms);
+		if (blockedTimer.isRunning() && blockedTimer.hasExpired()) {
+			blockedTimer.stop();
+			blocked = NULL;
+		}
+
+		if (blockList.clock(ms)) {
+			blockedNodes.clear();
+
+			// Drop linked nodes that are now blocked
+			for (std::vector<CP25Repeater*>::iterator it = m_repeaters.begin(); it != m_repeaters.end();) {
+				if (blockList.checkCallsign((*it)->m_callsign)) {
+					char buff[80U];
+					LogMessage("Removing %s (%s) blocked", (*it)->m_callsign.c_str(), CUDPSocket::display((*it)->m_addr, buff, 80U));
+
+					// End the transmission if its repeater has gone
+					if (*it == current) {
+						watchdogTimer.stop();
+						current = NULL;
+						loopDetect.cancel();
+					}
+
+					if (*it == blocked) {
+						blockedTimer.stop();
+						blocked = NULL;
+					}
+
+					delete *it;
+					it = m_repeaters.erase(it);
+				} else {
+					++it;
+				}
+			}
 		}
 
 		dumpTimer.clock(ms);

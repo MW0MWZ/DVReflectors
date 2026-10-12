@@ -67,6 +67,7 @@ private:
 	std::vector<CYSFRepeater*> m_repeaters;
 
 	CYSFRepeater* findRepeater(const sockaddr_storage& addr) const;
+	bool removeRepeater(const sockaddr_storage& addr, const char* reason);
 	void dumpRepeaters() const;
 };
 
