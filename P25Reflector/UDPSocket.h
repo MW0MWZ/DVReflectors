@@ -70,6 +70,8 @@ public:
 
 	static bool isNone(const sockaddr_storage& addr);
 
+	static bool isLoopback(const sockaddr_storage& addr);
+
 	static char* display(const sockaddr_storage& address, char* buffer, unsigned int length);
 
 private:

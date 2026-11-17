@@ -30,6 +30,7 @@ Time=5
 - Blocks by station: `M1AB` blocks `M1AB-ND`, `M1AB-RPT`, `M1AB/P` and `DL/M1AB`, not `M1ABC`. A full entry like `M1AB-ND` blocks just that callsign.
 - `*` ends a prefix, as in XLXd: `LX*` blocks every callsign starting `LX`, `*` blocks everyone. An `xlxd.blacklist` can be shared as-is.
 - Blocks users and nodes. A blocked node can't link, and is dropped if already linked.
+- Local links (from 127.x or `::1`) are interlinks: they always link and are never dropped, but the users on them are still blocked. Behind a local proxy every node looks local.
 - NXDN and P25: a callsign blocks every Id registered to it in the Id lookup file. Ids can be listed directly too, and wildcards match Ids as well (`235*`).
 
 ## Loop Detection
@@ -42,6 +43,6 @@ Built in, same rules as XLXd. Three short (<1s) transmissions in quick successio
 | 2 | Blocked for 10s |
 | 3 | Blocked for 300s, node removed and barred from linking |
 
-Strikes decay after 300s clean. Blocks cover the whole station, users and nodes alike.
+Strikes decay after 300s clean. Blocks cover the whole station, users and nodes alike. On a local link only the user is blocked, the link itself is never penalised or removed.
 
 This software is licenced under the GPL v2 and is primarily intended for amateur and educational use.

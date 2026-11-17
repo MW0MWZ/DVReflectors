@@ -237,8 +237,8 @@ void CYSFReflector::run()
 		unsigned int len = network.readData(buffer, 200U, addr, addrLen);
 		if (len > 0U) {
 			CYSFRepeater* rpt = findRepeater(addr);
-			// Refuse to link a blocked node, or one barred for looping
-			if (::memcmp(buffer, "YSFP", 4U) == 0 && rpt == NULL && (blockList.check(buffer + 4U) || loopDetect.checkLink(std::string((char*)(buffer + 4U), 10U)))) {
+			// Refuse to link a blocked node, or one barred for looping, a local link always gets in
+			if (::memcmp(buffer, "YSFP", 4U) == 0 && rpt == NULL && !CUDPSocket::isLoopback(addr) && (blockList.check(buffer + 4U) || loopDetect.checkLink(std::string((char*)(buffer + 4U), 10U)))) {
 				char buff[80U];
 				CUDPSocket::display(addr, buff, 80U);
 				if (blockedNodes.insert(std::string(buff)).second)
@@ -288,12 +288,15 @@ void CYSFReflector::run()
 					else
 						::memcpy(dst, "??????????", YSF_CALLSIGN_LENGTH);
 
+					// A local link is an interlink, only its users are judged, never the link or the tag
+					bool local = CUDPSocket::isLoopback(addr);
+
 					// Loop detection keys: the user (or the node until the user is known) and the linked node
-					std::string user = ysfUser(src, tag);
-					std::string node = rpt->m_callsign;
+					std::string user = local && ::memcmp(src, "??????????", YSF_CALLSIGN_LENGTH) == 0 ? "" : ysfUser(src, tag);
+					std::string node = local ? "" : rpt->m_callsign;
 
 					// Block the user or the node they are on
-					bool listed = blockList.check(src) || blockList.check(tag);
+					bool listed = blockList.check(src) || (!local && blockList.check(tag));
 					blocked = listed || loopDetect.check(user, node);
 					if (listed) {
 						if (!blockedTimer.isRunning() || ::memcmp(tag, blockedTag, YSF_CALLSIGN_LENGTH) != 0 || ::memcmp(src, blockedSrc, YSF_CALLSIGN_LENGTH) != 0) {
@@ -326,12 +329,14 @@ void CYSFReflector::run()
 						}
 
 						if (changed) {
-							std::string user = ysfUser(src, tag);
+							bool local = CUDPSocket::isLoopback(addr);
+
+							std::string user = local && ::memcmp(src, "??????????", YSF_CALLSIGN_LENGTH) == 0 ? "" : ysfUser(src, tag);
 							loopDetect.setUser(user);
 
 							// Block the user or the node they are on
-							bool listed = blockList.check(src) || blockList.check(tag);
-							blocked = listed || loopDetect.check(user, rpt->m_callsign);
+							bool listed = blockList.check(src) || (!local && blockList.check(tag));
+							blocked = listed || loopDetect.check(user, local ? "" : rpt->m_callsign);
 							if (blocked) {
 								// Blocked transmissions aren't scored, and the next packet is judged afresh
 								loopDetect.cancel();
@@ -428,9 +433,9 @@ void CYSFReflector::run()
 		if (blockList.clock(ms)) {
 			blockedNodes.clear();
 
-			// Drop linked nodes that are now blocked
+			// Drop linked nodes that are now blocked, never a local link
 			for (std::vector<CYSFRepeater*>::iterator it = m_repeaters.begin(); it != m_repeaters.end();) {
-				if (blockList.check((const unsigned char*)(*it)->m_callsign.c_str())) {
+				if (!CUDPSocket::isLoopback((*it)->m_addr) && blockList.check((const unsigned char*)(*it)->m_callsign.c_str())) {
 					char buff[80U];
 					LogMessage("Removing %s (%s) blocked", (*it)->m_callsign.c_str(), CUDPSocket::display((*it)->m_addr, buff, 80U));
 

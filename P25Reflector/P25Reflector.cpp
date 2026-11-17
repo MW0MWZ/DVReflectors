@@ -253,8 +253,8 @@ void CP25Reflector::run()
 		if (len > 0U) {
 			CP25Repeater* rpt = findRepeater(addr);
 
-			// Refuse to link a blocked node, or one barred for looping
-			if (buffer[0U] == 0xF0U && rpt == NULL && (blockList.checkCallsign(std::string((char*)(buffer + 1U), 10U)) || loopDetect.checkLink(std::string((char*)(buffer + 1U), 10U)))) {
+			// Refuse to link a blocked node, or one barred for looping, a local link always gets in
+			if (buffer[0U] == 0xF0U && rpt == NULL && !CUDPSocket::isLoopback(addr) && (blockList.checkCallsign(std::string((char*)(buffer + 1U), 10U)) || loopDetect.checkLink(std::string((char*)(buffer + 1U), 10U)))) {
 				char buff[80U];
 				CUDPSocket::display(addr, buff, 80U);
 				if (blockedNodes.insert(std::string(buff)).second)
@@ -300,6 +300,9 @@ void CP25Reflector::run()
 			} else if (rpt != NULL) {
 				rpt->m_timer.start();
 
+				// A local link is an interlink, only its users are judged, never the link
+				std::string node = CUDPSocket::isLoopback(addr) ? "" : rpt->m_callsign;
+
 				if (rpt == blocked) {
 					// Drop the rest of a blocked transmission
 					blockedTimer.start();
@@ -308,7 +311,7 @@ void CP25Reflector::run()
 						blockedTimer.stop();
 						blocked = NULL;
 					}
-				} else if (current == NULL && loopDetect.check("", rpt->m_callsign)) {
+				} else if (current == NULL && loopDetect.check("", node)) {
 					// Node blocked for looping, drop this transmission
 					blocked = rpt;
 					blockedTimer.start();
@@ -318,7 +321,7 @@ void CP25Reflector::run()
 					seen64    = false;
 					seen65    = false;
 					LogMessage("Transmission started from %s", current->m_callsign.c_str());
-					loopDetect.start("", rpt->m_callsign);
+					loopDetect.start("", node);
 					::memcpy(&loopAddr, &rpt->m_addr, sizeof(sockaddr_storage));
 				}
 
@@ -347,7 +350,7 @@ void CP25Reflector::run()
 						std::string callsign = lookup->find(srcId);
 						// The source Id only arrives in the 0x66 record, block from here on
 						bool listed = blockList.check(srcId);
-						if (listed || loopDetect.check(p25User(srcId), current->m_callsign)) {
+						if (listed || loopDetect.check(p25User(srcId), node)) {
 							if (listed)
 								LogMessage("Data from %s (%u) at %s blocked", callsign.c_str(), srcId, current->m_callsign.c_str());
 
@@ -441,9 +444,9 @@ void CP25Reflector::run()
 		if (blockList.clock(ms)) {
 			blockedNodes.clear();
 
-			// Drop linked nodes that are now blocked
+			// Drop linked nodes that are now blocked, never a local link
 			for (std::vector<CP25Repeater*>::iterator it = m_repeaters.begin(); it != m_repeaters.end();) {
-				if (blockList.checkCallsign((*it)->m_callsign)) {
+				if (!CUDPSocket::isLoopback((*it)->m_addr) && blockList.checkCallsign((*it)->m_callsign)) {
 					char buff[80U];
 					LogMessage("Removing %s (%s) blocked", (*it)->m_callsign.c_str(), CUDPSocket::display((*it)->m_addr, buff, 80U));
 

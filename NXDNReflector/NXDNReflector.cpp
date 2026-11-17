@@ -290,8 +290,8 @@ void CNXDNReflector::run()
 
 			if (::memcmp(buffer, "NXDNP", 5U) == 0 && len == 17U) {
 				unsigned short id = (buffer[15U] << 8) | buffer[16U];
-				// Refuse to link a blocked node, or one barred for looping
-				if (id == tg && rpt == NULL && (blockList.checkCallsign(std::string((char*)(buffer + 5U), 10U)) || loopDetect.checkLink(std::string((char*)(buffer + 5U), 10U)))) {
+				// Refuse to link a blocked node, or one barred for looping, a local link always gets in
+				if (id == tg && rpt == NULL && !CUDPSocket::isLoopback(address) && (blockList.checkCallsign(std::string((char*)(buffer + 5U), 10U)) || loopDetect.checkLink(std::string((char*)(buffer + 5U), 10U)))) {
 					char buff[80U];
 					CUDPSocket::display(address, buff, 80U);
 					if (blockedNodes.insert(std::string(buff)).second)
@@ -349,9 +349,12 @@ void CNXDNReflector::run()
 					unsigned short dstId = (buffer[7U] << 8) | buffer[8U];
 					bool grp = (buffer[9U] & 0x01U) == 0x01U;
 
+					// A local link is an interlink, only its users are judged, never the link
+					std::string node = CUDPSocket::isLoopback(address) ? "" : rpt->m_callsign;
+
 					// Block listed, or blocked for looping (user or node)
 					bool listed  = blockList.check(srcId);
-					bool blocked = listed || loopDetect.check(nxdnUser(srcId), rpt->m_callsign);
+					bool blocked = listed || loopDetect.check(nxdnUser(srcId), node);
 					if (listed) {
 						// Only log once per blocked transmission
 						if (!blockedTimer.isRunning() || srcId != blockedId) {
@@ -413,7 +416,7 @@ void CNXDNReflector::run()
 							LogMessage("Transmission from %s at %s to %s%u", callsign.c_str(), current->m_callsign.c_str(), grp ? "TG " : "", dstId);
 
 							active = ACTIVE_NXDN;
-							loopDetect.start(nxdnUser(srcId), rpt->m_callsign);
+							loopDetect.start(nxdnUser(srcId), node);
 							::memcpy(&loopAddr, &rpt->m_addr, sizeof(sockaddr_storage));
 						}
 
@@ -669,9 +672,9 @@ void CNXDNReflector::run()
 		if (blockList.clock(ms)) {
 			blockedNodes.clear();
 
-			// Drop linked nodes that are now blocked
+			// Drop linked nodes that are now blocked, never a local link
 			for (std::vector<CNXDNRepeater*>::iterator it = m_repeaters.begin(); it != m_repeaters.end();) {
-				if (blockList.checkCallsign((*it)->m_callsign)) {
+				if (!CUDPSocket::isLoopback((*it)->m_addr) && blockList.checkCallsign((*it)->m_callsign)) {
 					char buff[80U];
 					LogMessage("Removing %s (%s) blocked", (*it)->m_callsign.c_str(), CUDPSocket::display((*it)->m_addr, buff, 80U));
 
